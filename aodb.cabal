@@ -1,0 +1,20 @@
+name:                   aodb
+version:                0.0.1.0
+license:                MIT
+author:                 Frano Perleta
+maintainer:             frane.perleta@gmail.com
+build-type:             Simple
+cabal-version:          >=1.8
+
+library
+  exposed-modules:      Database.AODB.Handle
+  -- other-modules:        --
+  hs-source-dirs:       src
+  build-depends:        base >=4.6,
+                        bytestring >=0.10,
+                        digest >=0.0.1,
+                        unix >=2.7
+                        -- containers >=0.5,
+                        -- mtl >=2.1,
+                        -- transformers >=0.3,
+
