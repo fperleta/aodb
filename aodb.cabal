@@ -7,14 +7,15 @@ build-type:             Simple
 cabal-version:          >=1.8
 
 library
-  exposed-modules:      Database.AODB.Storage
-  -- other-modules:        --
+  exposed-modules:      Database.AODB.Model,
+                        Database.AODB.Struct
+  other-modules:        Database.AODB.Storage
   hs-source-dirs:       src
   build-depends:        base >=4.6,
                         bytestring >=0.10,
+                        containers >=0.5,
                         digest >=0.0.1,
                         mtl >=2.1,
                         unix >=2.7
-                        -- containers >=0.5,
                         -- transformers >=0.3,
 

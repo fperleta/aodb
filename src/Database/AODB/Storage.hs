@@ -1,7 +1,8 @@
 -- extensions {{{
 {-# LANGUAGE
         DeriveFunctor, FlexibleContexts, FlexibleInstances, FunctionalDependencies,
-        GeneralizedNewtypeDeriving, MultiParamTypeClasses, RankNTypes, UndecidableInstances
+        GeneralizedNewtypeDeriving, MultiParamTypeClasses, OverloadedStrings,
+        RankNTypes, UndecidableInstances
     #-}
 -- }}}
 
@@ -9,7 +10,7 @@
 module Database.AODB.Storage
 
     -- types.
-    ( ChunkID()
+    ( ChunkID(..)
 
     -- monad.
     , Storage()
@@ -75,6 +76,7 @@ data HandleState db = HS
     }
 
 newtype ChunkID db = ChunkID { unChunkID :: Word32 }
+  deriving (Eq, Ord)
 
 -- }}}
 
@@ -92,10 +94,14 @@ dbCreate fn fm = do
         , hsLast = ChunkID maxBound
         }
 
-    return $ Handle
-        { handlePath = fn
-        , handleState = mhs
-        }
+    let h = Handle
+            { handlePath = fn
+            , handleState = mhs
+            }
+
+    dbAppend h "aodb"
+
+    return h
 
 -- }}}
 
