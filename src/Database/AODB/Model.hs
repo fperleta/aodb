@@ -1,7 +1,9 @@
 -- extensions {{{
 {-# LANGUAGE
-        DataKinds, GADTs, GeneralizedNewtypeDeriving, KindSignatures,
-        OverloadedStrings, TypeFamilies
+        DataKinds, DeriveFunctor, FlexibleContexts, FlexibleInstances,
+        FunctionalDependencies, GADTs, GeneralizedNewtypeDeriving,
+        MultiParamTypeClasses, KindSignatures, OverloadedStrings,
+        RankNTypes, TypeFamilies, UndecidableInstances
     #-}
 -- }}}
 
@@ -39,8 +41,14 @@ module Database.AODB.Model
 -- }}}
 
 -- imports {{{
+import           Control.Applicative
+import           Control.Monad
+import           Control.Monad.State.Strict
 import qualified Data.ByteString as B
 import           Data.ByteString (ByteString)
+import qualified Data.IntMap.Strict as IM
+import           Data.IntMap.Strict (IntMap)
+import           Data.List (isPrefixOf)
 import qualified Data.Map as M
 import           Data.Map (Map)
 import           Data.String
@@ -149,7 +157,7 @@ treeS = S.struct
 
 data CommitObj db = CommitObj
     { commitPrev :: Maybe (Ref db Commit)
-    , commitSteps :: [CommitStep db]
+    , commitSteps :: [CommitStep db] -- reverse order
     }
 
 data CommitStep db
@@ -181,6 +189,181 @@ commitStepS = S.union S.byteString keyOf
     keyOf b = case b of
         CommitBlob {} -> "blob"
         CommitTree {} -> "tree"
+
+-- }}}
+
+-- the monad {{{
+
+newtype Model db a = Model { unModel :: StateT (Head db) (Storage db) a }
+  deriving (Functor, Applicative, Monad, MonadIO)
+
+instance MonadStorage db (Model db) where
+    askHandle = Model askHandle
+
+class (MonadStorage db m) => MonadModel db m | m -> db where
+    modelState :: (Head db -> (a, Head db)) -> m a
+    modelGets :: (Head db -> a) -> m a
+    modelGets f = modelState $ \h -> (f h, h)
+
+instance MonadModel db (Model db) where
+    modelState = Model . state
+
+instance (MonadModel db m, Monad (t m), MonadStorage db (t m), MonadTrans t) => MonadModel db (t m) where
+    modelState = lift . modelState
+
+-- head {{{
+
+data Head db = Head
+    { headTip :: Maybe (Ref db Commit)
+    , headPending :: [CommitStep db]
+    , headBlobs :: !(IntMap ByteString)
+    , headTrees :: !(IntMap (TreeObj db))
+    , headCommits :: !(IntMap (CommitObj db))
+    }
+
+headInit :: Ref db Commit -> Head db
+headInit tip = Head
+    { headTip = case tip of
+        Ref _ (ChunkID 0) -> Nothing
+        _ -> Just tip
+    , headPending = []
+    , headBlobs = IM.empty
+    , headTrees = IM.empty
+    , headCommits = IM.empty
+    }
+
+-- }}}
+
+-- running {{{
+
+runModel :: StorageWhere -> (forall db. Model db a) -> IO a
+runModel wh action = runStorage wh $ do
+    hd <- (headInit . Ref CommitTag) <$> lastChunk
+    let action' = do res <- action; commit; return res
+    (x, _) <- runStateT (unModel action') hd
+    return x
+
+-- }}}
+
+-- dereferencing {{{
+
+derefBlob :: (MonadModel db m) => Ref db Blob -> m ByteString
+derefBlob (Ref _ ch) = do
+    blobs <- modelGets headBlobs
+    let k = fromEnum ch
+    case IM.lookup k blobs of
+        Just bs -> return bs
+        Nothing -> do
+            bs <- recallChunk ch
+            modelState $ \h ->
+                (bs, h { headBlobs = IM.insert k bs blobs })
+
+derefTree :: (MonadModel db m) => Ref db Tree -> m (TreeObj db)
+derefTree r@(Ref _ ch) = do
+    trees <- modelGets headTrees
+    let k = fromEnum ch
+    case IM.lookup k trees of
+        Just x -> return x
+        Nothing -> do
+            x <- readRef r
+            modelState $ \h ->
+                (x, h { headTrees = IM.insert k x trees })
+
+derefCommit :: (MonadModel db m) => Ref db Commit -> m (CommitObj db)
+derefCommit r@(Ref _ ch) = do
+    commits <- modelGets headCommits
+    let k = fromEnum ch
+    case IM.lookup k commits of
+        Just x -> return x
+        Nothing -> do
+            x <- readRef r
+            modelState $ \h ->
+                (x, h { headCommits = IM.insert k x commits })
+
+-- }}}
+
+-- path resolution {{{
+
+resolvePath :: (IsObjType ty, MonadModel db m)
+            => ObjTag ty -> TreePath -> m (Maybe (Ref db ty))
+resolvePath tag path = do
+    tip <- modelGets headTip
+    pending <- modelGets headPending
+    go tip pending
+  where
+    past Nothing = return Nothing
+    past (Just cref) = do
+        CommitObj prev steps <- derefCommit cref
+        go prev steps
+
+    go prev [] = past prev
+    go prev (s:ss) = case tag of
+        BlobTag -> case s of
+            CommitBlob path' ref
+                | path' == path -> return $ Just ref
+            CommitTree path' ref
+                | path' `isPrefixOf` path && path' /= path
+                    -> blob ref $ drop (length path') path
+            _ -> go prev ss
+        TreeTag -> case s of
+            CommitTree path' ref
+                | path' `isPrefixOf` path -> tree ref $ drop (length path') path
+            _ -> go prev ss
+        _ -> error "resolvePath"
+
+    blob ref [] = return Nothing
+    blob ref (n:ns) = do
+        TreeObj bs ts <- derefTree ref
+        case ns of
+            [] -> return $ M.lookup n bs
+            _ -> case M.lookup n ts of
+                Just ref' -> blob ref' ns
+                Nothing -> return Nothing
+
+    tree ref [] = return $ Just ref
+    tree ref (n:ns) = do
+        TreeObj _ ts <- derefTree ref
+        case M.lookup n ts of
+            Just ref' -> tree ref' ns
+            Nothing -> return Nothing
+
+-- }}}
+
+-- path mutation {{{
+
+linkPath :: (IsObjType ty, MonadModel db m) => TreePath -> Ref db ty -> m (Ref db ty)
+linkPath path ref = modelState $ \h -> let
+    { step = case ref of
+        Ref BlobTag _ -> CommitBlob path ref
+        Ref TreeTag _ -> CommitTree path ref
+        _ -> error "linkPath"
+    } in (ref, h { headPending = step : headPending h })
+
+writeBlob :: (MonadModel db m) => TreePath -> ByteString -> m (Ref db Blob)
+writeBlob path bs = linkPath path =<< newRef BlobTag (BlobObj bs)
+
+writeTree :: (MonadModel db m) => TreePath -> TreeObj db -> m (Ref db Tree)
+writeTree path tree = linkPath path =<< newRef TreeTag tree
+
+-- }}}
+
+-- commiting {{{
+
+commit :: (MonadModel db m) => m (Ref db Commit)
+commit = do
+    tip <- modelGets headTip
+    pending <- modelGets headPending
+    case pending of
+        [] -> case tip of
+            Just ref -> return ref
+            Nothing -> do
+                tip' <- newRef CommitTag $ CommitObj Nothing []
+                modelState $ \h -> (tip', h { headTip = Just tip' })
+        _ -> do
+            tip' <- newRef CommitTag $ CommitObj tip pending
+            modelState $ \h -> (tip', h { headTip = Just tip', headPending = [] })
+
+-- }}}
 
 -- }}}
 

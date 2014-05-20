@@ -14,7 +14,7 @@ module Database.AODB.Storage
 
     -- monad.
     , Storage()
-    , MonadStorage
+    , MonadStorage(..)
     , StorageWhere(..)
     , runStorage
 
@@ -76,7 +76,7 @@ data HandleState db = HS
     }
 
 newtype ChunkID db = ChunkID { unChunkID :: Word32 }
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Enum)
 
 -- }}}
 
@@ -91,7 +91,7 @@ dbCreate fn fm = do
     -- initialize the handle state.
     mhs <- newMVar $ HS
         { hsFd = fd
-        , hsLast = ChunkID maxBound
+        , hsLast = ChunkID 0
         }
 
     let h = Handle
@@ -114,7 +114,7 @@ dbOpen fn = do
     fd <- openFd fn ReadWrite Nothing flags
 
     -- determine the last chunk.
-    fdSeek fd SeekFromEnd 4
+    blah <- fdSeek fd SeekFromEnd (-4)
     last <- alloca $ \buf -> do
         let _ = buf :: Ptr Word32
         fdReadBuf fd (castPtr buf) 4
