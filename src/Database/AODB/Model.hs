@@ -101,6 +101,14 @@ data Ref :: * -> ObjType -> * where
         -> {-# UNPACK #-} !(ChunkID db)
         -> Ref db ty
 
+instance Eq (Ref db ty) where
+    Ref _ ch == Ref _ ch' = ch == ch'
+    {-# INLINE (==) #-}
+
+instance Ord (Ref db ty) where
+    Ref _ ch `compare` Ref _ ch' = compare ch ch'
+    {-# INLINE compare #-}
+
 refS :: (IsObjType ty) => ObjTag ty -> Struct (Ref db ty)
 refS tag = S.struct
     (\(Ref _ ch) -> fromIntegral $ unChunkID ch)
