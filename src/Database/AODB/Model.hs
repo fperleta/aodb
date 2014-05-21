@@ -3,7 +3,7 @@
         DataKinds, DeriveFunctor, FlexibleContexts, FlexibleInstances,
         FunctionalDependencies, GADTs, GeneralizedNewtypeDeriving,
         MultiParamTypeClasses, KindSignatures, OverloadedStrings,
-        RankNTypes, TypeFamilies, UndecidableInstances
+        RankNTypes, ScopedTypeVariables, TypeFamilies, UndecidableInstances
     #-}
 -- }}}
 
@@ -19,8 +19,6 @@ module Database.AODB.Model
     , Ref()
     , refS
     , nullRefS
-    , newRef
-    , readRef
 
     -- blobs.
     , BlobObj(..)
@@ -37,6 +35,22 @@ module Database.AODB.Model
     , CommitObj(..)
     , CommitStep(..)
 
+    -- the monad.
+    , Model()
+    , MonadModel()
+    , runModel, StorageWhere(..)
+    , derefBlob
+    , derefTree
+    , derefCommit
+    , resolvePath
+    , readBlob
+    , readTree
+    , linkPath
+    , unlinkPath
+    , writeBlob
+    , writeTree
+    , commit
+
     ) where
 -- }}}
 
@@ -51,6 +65,8 @@ import           Data.IntMap.Strict (IntMap)
 import           Data.List (isPrefixOf)
 import qualified Data.Map as M
 import           Data.Map (Map)
+import qualified Data.Set as Set
+import           Data.Set (Set)
 import           Data.String
 
 import           Database.AODB.Storage
@@ -107,7 +123,7 @@ readRef (Ref tag ch) = do
     bs <- recallChunk ch
     case objDecode tag bs of
         Just x -> return x
-        Nothing -> error "readObj"
+        Nothing -> error "readRef"
 
 -- }}}
 
@@ -161,8 +177,8 @@ data CommitObj db = CommitObj
     }
 
 data CommitStep db
-    = CommitBlob TreePath (Ref db Blob)
-    | CommitTree TreePath (Ref db Tree)
+    = CommitBlob TreePath (Maybe (Ref db Blob))
+    | CommitTree TreePath (Maybe (Ref db Tree))
 
 instance IsObjType Commit where
     type ObjRepr Commit = CommitObj
@@ -179,11 +195,11 @@ commitStepS = S.union S.byteString keyOf
     [ S.Branch "blob"
         (\(CommitBlob p r) -> (p, r))
         (Just . uncurry CommitBlob)
-        (S.pairOf treePathS $ refS BlobTag)
+        (S.pairOf treePathS $ nullRefS BlobTag)
     , S.Branch "tree"
         (\(CommitTree p r) -> (p, r))
         (Just . uncurry CommitTree)
-        (S.pairOf treePathS $ refS TreeTag)
+        (S.pairOf treePathS $ nullRefS TreeTag)
     ]
   where
     keyOf b = case b of
@@ -284,60 +300,108 @@ derefCommit r@(Ref _ ch) = do
 
 -- path resolution {{{
 
-resolvePath :: (IsObjType ty, MonadModel db m)
-            => ObjTag ty -> TreePath -> m (Maybe (Ref db ty))
+resolvePath :: forall ty db m. (IsObjType ty, MonadModel db m)
+            => ObjTag ty -> TreePath
+            -> m (Maybe (Ref db ty), [CommitStep db])
 resolvePath tag path = do
     tip <- modelGets headTip
     pending <- modelGets headPending
-    go tip pending
+    go tip pending []
   where
-    past Nothing = return Nothing
-    past (Just cref) = do
+    past Nothing ps = return (Nothing, ps)
+    past (Just cref) ps = do
         CommitObj prev steps <- derefCommit cref
-        go prev steps
+        go prev steps ps
 
-    go prev [] = past prev
-    go prev (s:ss) = case tag of
+    go :: Maybe (Ref db Commit) -> [CommitStep db] -> [CommitStep db] -> m (Maybe (Ref db ty), [CommitStep db])
+    go prev [] ps = past prev ps
+    go prev (s:ss) ps = case tag of
         BlobTag -> case s of
-            CommitBlob path' ref
-                | path' == path -> return $ Just ref
-            CommitTree path' ref
+            CommitBlob path' mref
+                | path' == path -> return (mref, [])
+            CommitTree path' (Just ref)
                 | path' `isPrefixOf` path && path' /= path
                     -> blob ref $ drop (length path') path
-            _ -> go prev ss
+            CommitTree path' Nothing
+                | path' `isPrefixOf` path -> return (Nothing, [])
+            _ -> go prev ss ps
         TreeTag -> case s of
-            CommitTree path' ref
-                | path' `isPrefixOf` path -> tree ref $ drop (length path') path
-            _ -> go prev ss
+            CommitBlob path' _
+                | path `isPrefixOf` path' -> go prev ss $ s : ps
+            CommitTree path' mref
+                | path' `isPrefixOf` path -> case mref of
+                    Just ref -> tree ref (drop (length path') path) ps
+                    Nothing -> return (Nothing, ps)
+                | path `isPrefixOf` path' -> go prev ss $ s : ps
+            CommitTree path' Nothing
+                | path `isPrefixOf` path' -> go prev ss $ s : ps
+            _ -> go prev ss ps
         _ -> error "resolvePath"
 
-    blob ref [] = return Nothing
+    blob ref [] = return (Nothing, [])
     blob ref (n:ns) = do
         TreeObj bs ts <- derefTree ref
         case ns of
-            [] -> return $ M.lookup n bs
+            [] -> return (M.lookup n bs, [])
             _ -> case M.lookup n ts of
                 Just ref' -> blob ref' ns
-                Nothing -> return Nothing
+                Nothing -> return (Nothing, [])
 
-    tree ref [] = return $ Just ref
-    tree ref (n:ns) = do
+    tree ref [] ps = return $ (Just ref, ps)
+    tree ref (n:ns) ps = do
         TreeObj _ ts <- derefTree ref
         case M.lookup n ts of
-            Just ref' -> tree ref' ns
-            Nothing -> return Nothing
+            Just ref' -> tree ref' ns ps
+            Nothing -> return (Nothing, ps)
+
+-- }}}
+
+-- retrieval {{{
+
+readBlob :: (MonadModel db m) => TreePath -> m (Maybe ByteString)
+readBlob path = do
+    res <- resolvePath BlobTag path
+    case fst res of
+        Just ref -> Just `liftM` derefBlob ref
+        Nothing -> return Nothing
+
+readTree :: (MonadModel db m) => TreePath -> m (Set TreeName, Set TreeName)
+readTree path = do
+    res <- resolvePath TreeTag path
+    case res of
+        (Just ref, ps) -> do
+            TreeObj bs ts <- derefTree ref
+            return $ post ps (M.keysSet bs) (M.keysSet ts)
+        (Nothing, ps) -> return $ post ps Set.empty Set.empty
+  where
+    relative = drop $ length path
+    adjust :: TreePath -> Maybe (Ref db ty) -> Set TreeName -> Set TreeName
+    adjust path' Nothing = Set.delete . head $ relative path'
+    adjust path' (Just _) = Set.insert . head $ relative path'
+    post [] bs ts = (bs, ts)
+    post (p:ps) bs ts = case p of
+        CommitBlob path' mref -> post ps (adjust path' mref bs) ts
+        CommitTree path' mref -> post ps bs (adjust path' mref ts)
 
 -- }}}
 
 -- path mutation {{{
 
-linkPath :: (IsObjType ty, MonadModel db m) => TreePath -> Ref db ty -> m (Ref db ty)
+linkPath :: (MonadModel db m) => TreePath -> Ref db ty -> m (Ref db ty)
 linkPath path ref = modelState $ \h -> let
     { step = case ref of
-        Ref BlobTag _ -> CommitBlob path ref
-        Ref TreeTag _ -> CommitTree path ref
+        Ref BlobTag _ -> CommitBlob path $ Just ref
+        Ref TreeTag _ -> CommitTree path $ Just ref
         _ -> error "linkPath"
     } in (ref, h { headPending = step : headPending h })
+
+unlinkPath :: (IsObjType ty, MonadModel db m) => ObjTag ty -> TreePath -> m ()
+unlinkPath tag path = modelState $ \h -> let
+    { step = case tag of
+        BlobTag -> CommitBlob path Nothing
+        TreeTag -> CommitTree path Nothing
+        _ -> error "unlinkPath"
+    } in ((), h { headPending = step : headPending h })
 
 writeBlob :: (MonadModel db m) => TreePath -> ByteString -> m (Ref db Blob)
 writeBlob path bs = linkPath path =<< newRef BlobTag (BlobObj bs)

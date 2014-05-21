@@ -220,13 +220,13 @@ instance (MonadStorage db m, Monad (t m), MonadIO (t m), MonadTrans t) => MonadS
 
 data StorageWhere
     = Existing FilePath
-    | NewFile FilePath FileMode
+    | NewFile FilePath
 
 runStorage :: StorageWhere -> (forall db. Storage db a) -> IO a
 runStorage wh action = do
     h <- case wh of
         Existing fn -> dbOpen fn
-        NewFile fn fm -> dbCreate fn fm
+        NewFile fn -> dbCreate fn $ ownerReadMode `unionFileModes` ownerWriteMode
     runReaderT (unStorage action) h `finally` dbClose h
 
 -- }}}
