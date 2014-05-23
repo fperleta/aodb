@@ -5,8 +5,11 @@
 -- exports {{{
 module Database.AODB.Struct
 
+    -- re-exports.
+    ( Word(..), Word8(..), Word32(..)
+
     -- types.
-    ( Struct()
+    , Struct()
     , Branch(..)
 
     -- front-end.
@@ -14,6 +17,7 @@ module Database.AODB.Struct
     , decode
 
     -- simple structs.
+    , word8
     , word32
     , natural
     , byteString
@@ -23,6 +27,7 @@ module Database.AODB.Struct
     , union
     , pairOf
     , tripleOf
+    , quadOf
     , listOf
     , dictOf
 
@@ -73,6 +78,9 @@ decode s bs = do
 -- }}}
 
 -- simple structs {{{
+
+word8 :: Struct Word8
+word8 = Struct B.word8 B.uncons
 
 word32 :: Struct Word32
 word32 = Struct B.word32BE $ \bs -> do
@@ -160,6 +168,13 @@ tripleOf s1 s2 s3 = struct
     (\(x, y, z) -> (x, (y, z)))
     (\(x, (y, z)) -> Just (x, y, z))
     (pairOf s1 $ pairOf s2 s3)
+
+quadOf :: Struct a -> Struct b -> Struct c -> Struct d -> Struct (a, b, c, d)
+quadOf s1 s2 s3 s4 = struct
+    (\(w, x, y, z) -> ((w, x), (y, z)))
+    (\((w, x), (y, z)) -> Just (w, x, y, z))
+    (pairOf (pairOf s1 s2)
+            (pairOf s3 s4))
 
 listOf :: Struct a -> Struct [a]
 listOf s = Struct enc' dec'
