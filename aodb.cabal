@@ -1,6 +1,7 @@
 name:                   aodb
 version:                0.0.1.0
-license:                MIT
+license:                BSD3
+license-file:           LICENSE
 author:                 Frano Perleta
 maintainer:             frane.perleta@gmail.com
 build-type:             Simple
@@ -17,5 +18,4 @@ library
                         digest >=0.0.1,
                         mtl >=2.1,
                         unix >=2.7
-                        -- transformers >=0.3,
 
