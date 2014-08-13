@@ -45,6 +45,10 @@ module Database.AODB.Model
     , Model()
     , MonadModel()
     , runModel, StorageWhere(..)
+    , createBlob
+    , createTree
+    , createBag
+    , createCommit
     , derefBlob
     , derefTree
     , derefBag
@@ -366,6 +370,34 @@ runModel wh action = runStorage wh $ do
 
 -- }}}
 
+-- creation {{{
+
+createBlob :: (MonadModel db m) => ByteString -> m (Ref db Blob)
+createBlob bs = do
+    r@(Ref _ ch) <- newRef BlobTag $ BlobObj bs
+    let k = fromEnum ch
+    modelState $ \h -> (r, h { headBlobs = IM.insert k bs $ headBlobs h })
+
+createTree :: (MonadModel db m) => TreeObj db -> m (Ref db Tree)
+createTree x = do
+    r@(Ref _ ch) <- newRef TreeTag x
+    let k = fromEnum ch
+    modelState $ \h -> (r, h { headTrees = IM.insert k x $ headTrees h })
+
+createBag :: (MonadModel db m) => BagObj db -> m (Ref db Bag)
+createBag x = do
+    r@(Ref _ ch) <- newRef BagTag x
+    let k = fromEnum ch
+    modelState $ \h -> (r, h { headBags = IM.insert k x $ headBags h })
+
+createCommit :: (MonadModel db m) => CommitObj db -> m (Ref db Commit)
+createCommit x = do
+    r@(Ref _ ch) <- newRef CommitTag x
+    let k = fromEnum ch
+    modelState $ \h -> (r, h { headCommits = IM.insert k x $ headCommits h })
+
+-- }}}
+
 -- dereferencing {{{
 
 derefBlob :: (MonadModel db m) => Ref db Blob -> m ByteString
@@ -592,13 +624,13 @@ unlinkPath tag path = modelState $ \h -> let
     } in ((), h { headPending = step : headPending h })
 
 writeBlob :: (MonadModel db m) => TreePath -> ByteString -> m (Ref db Blob)
-writeBlob path bs = linkPath path =<< newRef BlobTag (BlobObj bs)
+writeBlob path bs = linkPath path =<< createBlob bs
 
 writeTree :: (MonadModel db m) => TreePath -> TreeObj db -> m (Ref db Tree)
-writeTree path tree = linkPath path =<< newRef TreeTag tree
+writeTree path tree = linkPath path =<< createTree tree
 
 writeBag :: (MonadModel db m) => TreePath -> BagObj db -> m (Ref db Bag)
-writeBag path bag = linkPath path =<< newRef BagTag bag
+writeBag path bag = linkPath path =<< createBag bag
 
 bagAdd :: (MonadModel db m) => TreePath -> Ref db ty -> m ()
 bagAdd path ref = modelState $ \h ->
